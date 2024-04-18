@@ -6,6 +6,8 @@ use std::io::BufReader;
 use serde::Deserialize;
 use serde::Serialize;
 use std::env;
+use std::collections::HashMap;
+use tqdm::tqdm;
 
 fn is_zip(path: &DirEntry) -> bool {
     path.file_name()
@@ -59,23 +61,37 @@ fn dump_and_save_zip_data(all_zips_data: Vec<FileData>, file_path: String) -> Re
     Ok(())
 }
 
-fn read_zips_data_from_json(file_path: String) -> Result<Vec<FileData>, Box<dyn std::error::Error>> {
-    let mut zips_data:Vec<FileData> = Vec::new();
+type Term = String;
+type DocumentId = String;
+
+type DocumentMap = HashMap<Term, Vec<DocumentId>>;
+
+fn read_zips_data_from_json(file_path: String) -> Result<DocumentMap, Box<dyn std::error::Error>> {
+    let mut doc_map:DocumentMap = DocumentMap::new();
 
     let file = File::open(file_path)?;
     let reader = BufReader::new(file);
 
-    for line in reader.lines(){
+    for line in tqdm(reader.lines()){
         let zip_data:FileData = serde_json::from_str(&line?)?;
-        zips_data.push(zip_data)
+        let file_names = zip_data.files;
+        for file_name in file_names.iter(){
+            for path_part in file_name.split("/"){
+                let docid_vec = doc_map.entry(path_part.to_string()).or_insert(vec![]);
+                if !docid_vec.contains(&(zip_data.name)){
+                    docid_vec.push(zip_data.name.clone());
+                }
+            }
+        }
     }
 
-    Ok(zips_data)
+    Ok(doc_map)
 }
 
-fn print_zips_data(zips_data: Vec<FileData>){
-    for zip_data in zips_data{
-        println!("{:?}", zip_data);
+#[allow(dead_code)]
+fn print_zips_data(zips_data: DocumentMap){
+    for (term, filenames) in &zips_data{
+        println!("term {} found in: {:?}", term, filenames);
     }
 }
 
@@ -97,7 +113,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>>{
             dump_and_save_zip_data(all_zips_data?, String::from("zips.ndjson"))?;
         },
         "read" => {
-            print_zips_data(read_zips_data_from_json(file_name.to_string())?);
+            let zip_data = read_zips_data_from_json(file_name.to_string())?;
+            println!("Succesfully read ndJSON file: {} entries", zip_data.len());
+            // print_zips_data(zip_data);
         },
         _ => {
             println!("Invalid option")
