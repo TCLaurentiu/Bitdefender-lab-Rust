@@ -13,14 +13,19 @@ use bimap::BiMap;
 type Term = String;
 type DocumentId = u64;
 
-type DocumentMap = HashMap<Term, HashSet<DocumentId>>;
-type ResultsMap = HashMap<DocumentId, u64>;
+type DocumentMap = HashMap<Term, TermData>;
+type ResultsMap = HashMap<DocumentId, f64>;
 type GenericResultError<T> = Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct FileData {
     name: String,
     files: Vec<String>,
+}
+
+struct TermData{
+    docset: HashMap<DocumentId, u64>,
+    idf: f64,
 }
 
 fn is_zip(path: &DirEntry) -> bool {
@@ -74,47 +79,71 @@ fn dump_and_save_zip_data(
 
 fn read_zips_data_from_json(
     file_path: String
-) -> GenericResultError<(DocumentMap, BiMap<String, u64>)> {
+) -> GenericResultError<(DocumentMap, BiMap<String, u64>, HashMap<DocumentId, u64>)> {
     let mut doc_map: DocumentMap = DocumentMap::new();
-    let mut docid_to_int: BiMap<String, u64> = BiMap::new();
+    let mut docid_to_int: BiMap<String, DocumentId> = BiMap::new();
+
+    let mut document_size: HashMap<DocumentId, u64> = HashMap::new();
 
     let file = File::open(file_path)?;
     let reader = BufReader::new(file);
 
     let mut zip_name_id = 0;
 
+    let mut words_in_current_doc = HashSet::new();
+
     for line in tqdm(reader.lines()) {
         let zip_data: FileData = serde_json::from_str(&line?)?;
         let file_names = zip_data.files;
         docid_to_int.insert(zip_data.name, zip_name_id);
+
         for file_name in file_names.iter() {
             for path_part in file_name.split("/") {
-                let docid_set = doc_map.entry(path_part.to_string()).or_insert(HashSet::new());
-                docid_set.insert(zip_name_id);
+                let docid_set = doc_map.entry(path_part.to_string()).or_insert(TermData{
+                    docset: HashMap::new(),
+                    idf: 0f64,
+                });
+                *(docid_set.docset.entry(zip_name_id).or_insert(0)) += 1;
+                words_in_current_doc.insert(path_part);
             }
         }
+        document_size.entry(zip_name_id).or_insert(words_in_current_doc.len() as u64);
+        words_in_current_doc = HashSet::new();
         zip_name_id += 1;
     }
 
-    Ok((doc_map, docid_to_int))
+    let doc_count = zip_name_id as f64;
+    for (_, termdata) in doc_map.iter_mut(){
+        let count = termdata.docset.len() as f64;
+        termdata.idf = ((doc_count- count + 0.5)/(count + 0.5) + 1.0).ln();
+    }
+
+    Ok((doc_map, docid_to_int, document_size))
 }
 
 #[allow(dead_code)]
 fn print_zips_data(zips_data: DocumentMap) {
-    for (term, filenames) in &zips_data {
-        println!("term {} found in: {:?}", term, filenames);
+    for (term, termdata) in &zips_data {
+        println!("term {} found in: {:?}", term, termdata.docset);
     }
 }
 
+
+#[allow(dead_code)]
 fn print_data_statistics(data: &DocumentMap) {
     let term_count = data.len();
     let mut term_docid_pairs = 0;
-    for (_, filenames) in data {
-        term_docid_pairs += filenames.len();
+    for (term, termdata) in data {
+        term_docid_pairs += termdata.docset.len();
+        println!("Term {} with IDF = {}", term, termdata.idf);
+        for (file, occurence_count) in &(termdata.docset){
+            println!("Term appeared in document {} {} times", file, occurence_count);
+        }
     }
     println!("{} terms and {} term-docid pairs", term_count, term_docid_pairs);
 }
 
+/*
 fn search(search_terms: &Vec<&str>, doc_map: &DocumentMap) -> GenericResultError<ResultsMap> {
     let mut search_results: ResultsMap = HashMap::new();
 
@@ -127,18 +156,79 @@ fn search(search_terms: &Vec<&str>, doc_map: &DocumentMap) -> GenericResultError
     }
 
     Ok(search_results)
+}*/
+
+fn search(search_terms: &Vec<&str>, doc_map: &DocumentMap, doc_size: &HashMap<DocumentId, u64>, score_function: &dyn Fn(&Vec<&str>, &DocumentMap, &HashMap<DocumentId, u64>, DocumentId) -> GenericResultError<f64>) -> GenericResultError<ResultsMap>{
+    let mut search_results: ResultsMap = HashMap::new();
+
+    let document_count = doc_size.len();
+
+    for document_id in 0..document_count{
+        let score = score_function(search_terms, doc_map, doc_size, document_id as u64)?;
+        search_results.entry(document_id as u64).or_insert(score);
+    }
+
+    Ok(search_results)
 }
 
-fn order_results_map(results_map: &ResultsMap) -> GenericResultError<Vec<(DocumentId, u64)>> {
-    let mut results_vec = results_map.iter().map(|(doc_id, freq)| (*doc_id, *freq)).collect::<Vec<(DocumentId, u64)>>();
-    results_vec.sort_by(|a, b| (*b).1.cmp(&(*a).1));
+fn bm25_score_function(search_terms: &Vec<&str>, doc_map: &DocumentMap, doc_size: &HashMap<DocumentId, u64>, document_id: DocumentId) -> GenericResultError<f64>{
+
+    let k1 = 1.2;
+    let b = 0.75;
+
+    let mut score = 0f64;
+    let mut mean_size = 0f64;
+    let doc_count = doc_size.len() as f64;
+
+    for (_, document_size) in doc_size{
+        mean_size += (*document_size) as f64;
+    }
+
+    mean_size /=  doc_count as f64;
+
+    let default_idf = ((doc_count + 0.5) / 0.5 + 1.0).ln();
+
+    for search_term in search_terms{
+        let idf = match doc_map.contains_key(*search_term) {
+            false => default_idf,
+            true => doc_map.get(*search_term).unwrap().idf
+        };
+        let occurence_in_doc = match doc_map.contains_key(*search_term){
+            false => 0f64,
+            true => *(doc_map.get(*search_term).unwrap().docset.get(&document_id).unwrap_or(&0)) as f64
+        };
+        let current_doc_size = *(doc_size.get(&document_id).unwrap()) as f64;
+        let numerator = occurence_in_doc * (k1 + 1.0f64);
+        let denumerator = occurence_in_doc + k1 * (1.0f64 - b + b * current_doc_size / mean_size);
+        let fraction = numerator / denumerator;
+        score += idf * fraction;
+    }
+    
+    Ok(score)
+}
+
+fn order_results_map(results_map: &ResultsMap) -> GenericResultError<Vec<(DocumentId, f64)>> {
+    let mut results_vec = results_map.iter().map(|(doc_id, freq)| (*doc_id, *freq)).collect::<Vec<(DocumentId, f64)>>();
+    results_vec.sort_by(|a, b| (*b).1.total_cmp(&(*a).1));
     Ok(results_vec)
 }
 
-fn print_search_results(results_vec: &Vec<(DocumentId, u64)>, docid_to_int: &BiMap<String, u64>, search_terms: &Vec<&str>){
-    let search_term_count = search_terms.len();
-    for (doc_id, frequency) in results_vec{
-        println!("Zip file {}, {}/{} terms are present", docid_to_int.get_by_right(doc_id).unwrap(), frequency, search_term_count);
+fn print_search_results(results_vec: &Vec<(DocumentId, f64)>, docid_to_int: &BiMap<String, u64>, search_terms: &Vec<&str>, limit: usize){
+    println!("For search terms:");
+    for search_term in search_terms{
+        print!("{} ", search_term);
+    }
+    println!("");
+    println!("Found the following results:");
+    for (doc_id, score) in results_vec.iter().take(limit){
+        println!("Zip file {}, with score {}", docid_to_int.get_by_right(doc_id).unwrap(), score);
+    }
+}
+
+#[allow(dead_code)]
+fn print_document_size(document_size: &HashMap<DocumentId, u64>){
+    for (doc_id, size) in document_size{
+        println!("Document {} contains {} unique items", doc_id, size);
     }
 }
 
@@ -161,12 +251,13 @@ fn main() -> GenericResultError<()> {
             dump_and_save_zip_data(all_zips_data?, String::from("zips.ndjson"))?;
         }
         "read" => {
-            let search_terms = vec!["lombok", "AUTHORS", "README.md"];
-            let (doc_map, docid_to_int) = read_zips_data_from_json(file_name.to_string())?;
-            print_data_statistics(&doc_map);
-            let results_map = search(&search_terms, &doc_map)?;
+            let search_terms = vec!["assets", "META-INF", "androidx.activity_activity.version", "i18n_bg_BG.json"];
+            let (doc_map, docid_to_int, document_size) = read_zips_data_from_json(file_name.to_string())?;
+            //print_data_statistics(&doc_map);
+            //print_document_size(&document_size);
+            let results_map = search(&search_terms, &doc_map, &document_size, &bm25_score_function)?;
             let ordered_results_map = order_results_map(&results_map)?;
-            print_search_results(&ordered_results_map, &docid_to_int, &search_terms);
+            print_search_results(&ordered_results_map, &docid_to_int, &search_terms, 5);
         }
         _ => {
             println!("Invalid option");
