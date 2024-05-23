@@ -1,12 +1,8 @@
+use std::fs::{File, DirEntry};
 use std::fs;
-use std::fs::File;
-use std::fs::DirEntry;
-use std::io::prelude::*;
-use std::io::BufReader;
-use serde::Deserialize;
-use serde::Serialize;
-use std::env;
-use std::collections::HashSet;
+use std::io::{prelude::*, BufReader};
+use serde::{Serialize, Deserialize};
+use std::{env, collections::HashSet};
 use tqdm::tqdm;
 use bimap::BiMap;
 use eyre;
@@ -277,15 +273,13 @@ async fn upload(mut upload: Form<Upload<'_>>) -> Result<Json<String>, String> {
 
 #[post("/build")]
 async fn build(server_state: &State<Arc<RwLock<ServerState>>>) -> Result<(), String>{
+    let all_zips_data = find_zip_data_in_folder(String::from("static/zips/")).map_err(|err| format!("Error: {err:#}"))?;
+    dump_and_save_zip_data(all_zips_data, String::from("static/index/data.json")).map_err(|err| format!("Error: {err:#}"))?;
     let (doc_map, docid_to_int, document_size) = read_zips_data_from_json(String::from("static/index/data.json")).map_err(|err| format!("Error: {err:#}"))?;
     let mut server_state = server_state.write().map_err(|err| format!("Error: {err:#}"))?;
     server_state.doc_map = doc_map;
     server_state.docid_to_int = docid_to_int;
     server_state.document_size = document_size;
-
-    print_data_statistics(&server_state.doc_map);
-    
-    print_document_size(&server_state.document_size);
     Ok(())
 }
 
@@ -341,12 +335,16 @@ fn search(req: Json<SearchData>, server_state: &State<Arc<RwLock<ServerState>>>)
         }
     }).collect();
 
-    print_search_results(&ordered_results_map, &docid_to_int, &terms, 5);
-
     let total = matches.len();
 
+    let max_length = req.max_length.unwrap_or(total as i32);
+    let min_score = req.min_score.unwrap_or(0.0);
+
+    let filtered_matches: Vec<SearchMatch> = matches.into_iter().filter(|search_match| search_match.score > min_score).take(max_length as usize).collect();
+    let total = filtered_matches.len();
+
     Ok(Json(SearchResult{
-        matches: matches,
+        matches: filtered_matches,
         total: total,
     }))
 
@@ -354,37 +352,6 @@ fn search(req: Json<SearchData>, server_state: &State<Arc<RwLock<ServerState>>>)
 
 #[rocket::main]
 async fn main() -> eyre::Result<()> {
-    let args: Vec<String> = env::args().collect();
-
-    /*if args.len() != 3 {
-        println!(
-            "Invalid arguments. Valid usage is -- read 'ndjson_file_name' or -- write 'folder_path'"
-        );
-        return Ok(());
-    }
-
-    let query = &args[1];
-    let file_name = &args[2];
-
-    match query.as_str() {
-        "write" => {
-            let all_zips_data = find_zip_data_in_folder(file_name.to_string());
-            dump_and_save_zip_data(all_zips_data?, String::from("zips.ndjson"))?;
-        }
-        "read" => {
-            let search_terms = vec!["assets", "META-INF", "androidx.activity_activity.version", "i18n_bg_BG.json"];
-            let (doc_map, docid_to_int, document_size) = read_zips_data_from_json(file_name.to_string())?;
-            //print_data_statistics(&doc_map);
-            //print_document_size(&document_size);
-            let results_map = search(&search_terms, &doc_map, &document_size, &bm25_score_function)?;
-            let ordered_results_map = order_results_map(&results_map)?;
-            print_search_results(&ordered_results_map, &docid_to_int, &search_terms, 5);
-        }
-        _ => {
-            println!("Invalid option");
-        }
-    }*/
-
     let server_state = Arc::new(RwLock::new(
         ServerState{
             doc_map: DocumentMap::default(), 
@@ -396,7 +363,7 @@ async fn main() -> eyre::Result<()> {
     rocket
         ::build()
         .manage(server_state)
-        .mount("/", routes![index, upload, build, clear, search])
+        .mount("/", routes![index, upload, build, clear, search])   
         .mount("/dashboard", FileServer::from("static"))
         .ignite().await?
         .launch().await?;

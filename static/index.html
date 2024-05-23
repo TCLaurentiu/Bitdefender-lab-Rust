@@ -194,7 +194,7 @@
             const minScore = document.getElementById('min-score').value;
             const maxLength = document.getElementById('max-length').value;
             const searchTerms = document.getElementById('search-terms').value;
-            const seatchTermsSeparated = searchTerms.split(',');
+            const seatchTermsSeparated = searchTerms.split(',').map(str => str.trim());
 
             const postData = {
                 terms: seatchTermsSeparated,
