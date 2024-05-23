@@ -1,3 +1,5 @@
+#![allow(clippy::blocks_in_conditions)]
+
 use std::{ 
     fs::{ File, DirEntry }, 
     io::{ prelude::*, BufReader },
@@ -9,7 +11,6 @@ use std::{
 use serde::{ Serialize, Deserialize };
 
 use tqdm::tqdm;
-use eyre;
 use uuid::Uuid;
 
 use bimap::BiMap;
@@ -30,6 +31,16 @@ struct TermData {
 type DocumentMap = FxHashMap<Term, TermData>;
 type ResultsMap = FxHashMap<DocumentId, f64>;
 type GenericResultError<T> = Result<T, Box<dyn std::error::Error>>;
+
+// all the data we generate after parsing a folder of zip files
+type ZipData = (DocumentMap, BiMap<String, u64>, FxHashMap<DocumentId, u64>);
+
+type ScoreFunction = dyn Fn(
+    &Vec<String>,
+    &DocumentMap,
+    &FxHashMap<DocumentId, u64>,
+    DocumentId
+) -> GenericResultError<f64>;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct FileData {
@@ -88,7 +99,7 @@ fn dump_and_save_zip_data(
 
 fn read_zips_data_from_json(
     file_path: String
-) -> GenericResultError<(DocumentMap, BiMap<String, u64>, FxHashMap<DocumentId, u64>)> {
+) -> GenericResultError<ZipData> {
     let mut doc_map: DocumentMap = DocumentMap::default();
     let mut docid_to_int: BiMap<String, DocumentId> = BiMap::new();
 
@@ -107,7 +118,7 @@ fn read_zips_data_from_json(
         docid_to_int.insert(zip_data.name, zip_name_id);
 
         for file_name in file_names.iter() {
-            for path_part in file_name.split("/") {
+            for path_part in file_name.split('/') {
                 let docid_set = doc_map.entry(path_part.to_string()).or_insert(TermData {
                     docset: FxHashMap::default(),
                     idf: 0f64,
@@ -155,12 +166,7 @@ fn run_search(
     search_terms: &Vec<String>,
     doc_map: &DocumentMap,
     doc_size: &FxHashMap<DocumentId, u64>,
-    score_function: &dyn Fn(
-        &Vec<String>,
-        &DocumentMap,
-        &FxHashMap<DocumentId, u64>,
-        DocumentId
-    ) -> GenericResultError<f64>
+    score_function: &ScoreFunction,
 ) -> GenericResultError<ResultsMap> {
     let mut search_results: ResultsMap = FxHashMap::default();
 
@@ -187,11 +193,11 @@ fn bm25_score_function(
     let mut mean_size = 0f64;
     let doc_count = doc_size.len() as f64;
 
-    for (_, document_size) in doc_size {
+    for document_size in doc_size.values() {
         mean_size += *document_size as f64;
     }
 
-    mean_size /= doc_count as f64;
+    mean_size /= doc_count;
 
     let default_idf = ((doc_count + 0.5) / 0.5 + 1.0).ln();
 
@@ -220,13 +226,13 @@ fn order_results_map(results_map: &ResultsMap) -> GenericResultError<Vec<(Docume
         .iter()
         .map(|(doc_id, freq)| (*doc_id, *freq))
         .collect::<Vec<(DocumentId, f64)>>();
-    results_vec.sort_by(|a, b| (*b).1.total_cmp(&(*a).1));
+    results_vec.sort_by(|a, b| b.1.total_cmp(&a.1));
     Ok(results_vec)
 }
 
 #[allow(dead_code)]
 fn print_search_results(
-    results_vec: &Vec<(DocumentId, f64)>,
+    results_vec: &[(DocumentId, f64)],
     docid_to_int: &BiMap<String, u64>,
     search_terms: &Vec<String>,
     limit: usize
@@ -235,7 +241,7 @@ fn print_search_results(
     for search_term in search_terms {
         print!("{} ", search_term);
     }
-    println!("");
+    println!();
     println!("Found the following results:");
     for (doc_id, score) in results_vec.iter().take(limit) {
         println!("Zip file {}, with score {}", docid_to_int.get_by_right(doc_id).unwrap(), score);
@@ -339,7 +345,7 @@ fn search(
     let docid_to_int = &server_state.docid_to_int;
     let document_size = &server_state.document_size;
 
-    let results_map = run_search(&terms, &doc_map, &document_size, &bm25_score_function).map_err(
+    let results_map = run_search(&terms, doc_map, document_size, &bm25_score_function).map_err(
         |err| format!("Error: {err:#}")
     )?;
     let ordered_results_map = order_results_map(&results_map).map_err(|err|
@@ -370,7 +376,7 @@ fn search(
     Ok(
         Json(SearchResult {
             matches: filtered_matches,
-            total: total,
+            total,
         })
     )
 }
