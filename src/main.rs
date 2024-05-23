@@ -1,36 +1,40 @@
-use std::fs::{File, DirEntry};
-use std::fs;
-use std::io::{prelude::*, BufReader};
-use serde::{Serialize, Deserialize};
-use std::{env, collections::HashSet};
-use tqdm::tqdm;
-use bimap::BiMap;
-use eyre;
+use std::{ 
+    fs::{ File, DirEntry }, 
+    io::{ prelude::*, BufReader },
+    sync::{ Arc, RwLock },
+    fs,
+    collections::HashSet
+};
 
-use std::sync::{Arc, RwLock};
+use serde::{ Serialize, Deserialize };
+
+use tqdm::tqdm;
+use eyre;
+use uuid::Uuid;
+
+use bimap::BiMap;
+use fxhash::FxHashMap;
 
 #[macro_use]
 extern crate rocket;
-use rocket::{fs::FileServer, serde::json::Json, State};
+use rocket::{ fs::{FileServer, TempFile}, form::Form, serde::json::Json, State };
 
 type Term = String;
 type DocumentId = u64;
+
+struct TermData {
+    docset: FxHashMap<DocumentId, u64>,
+    idf: f64,
+}
 
 type DocumentMap = FxHashMap<Term, TermData>;
 type ResultsMap = FxHashMap<DocumentId, f64>;
 type GenericResultError<T> = Result<T, Box<dyn std::error::Error>>;
 
-use fxhash::FxHashMap;
-
 #[derive(Debug, Serialize, Deserialize)]
 struct FileData {
     name: String,
     files: Vec<String>,
-}
-
-struct TermData {
-    docset: FxHashMap<DocumentId, u64>,
-    idf: f64,
 }
 
 fn is_zip(path: &DirEntry) -> bool {
@@ -220,6 +224,7 @@ fn order_results_map(results_map: &ResultsMap) -> GenericResultError<Vec<(Docume
     Ok(results_vec)
 }
 
+#[allow(dead_code)]
 fn print_search_results(
     results_vec: &Vec<(DocumentId, f64)>,
     docid_to_int: &BiMap<String, u64>,
@@ -244,38 +249,50 @@ fn print_document_size(document_size: &FxHashMap<DocumentId, u64>) {
     }
 }
 
+#[derive(Default)]
+struct ServerState {
+    doc_map: DocumentMap,
+    docid_to_int: BiMap<String, u64>,
+    document_size: FxHashMap<DocumentId, u64>,
+}
+
 #[get("/")]
 fn index() -> &'static str {
     "Hello, world!"
 }
-
-use rocket::fs::TempFile;
-use rocket::form::Form;
 
 #[derive(FromForm)]
 struct Upload<'r> {
     file: TempFile<'r>,
 }
 
-use uuid::Uuid;
-
-#[post("/upload", data = "<upload>")]   
+#[post("/upload", data = "<upload>")]
 async fn upload(mut upload: Form<Upload<'_>>) -> Result<Json<String>, String> {
     let id = Uuid::new_v4();
     let mut path = "static/zips/".to_owned();
     let name = format!("{}.zip", id.simple());
     path.push_str(&name);
     upload.file.persist_to(path).await.map_err(|err| format!("Error: {err:#}"))?;
-    let all_zips_data = find_zip_data_in_folder(String::from("static/zips/")).map_err(|err| format!("Error: {err:#}"))?;
-    dump_and_save_zip_data(all_zips_data, String::from("static/index/data.json")).map_err(|err| format!("Error: {err:#}"))?;
+    let all_zips_data = find_zip_data_in_folder(String::from("static/zips/")).map_err(|err|
+        format!("Error: {err:#}")
+    )?;
+    dump_and_save_zip_data(all_zips_data, String::from("static/index/data.json")).map_err(|err|
+        format!("Error: {err:#}")
+    )?;
     Ok(Json(String::from("ookie dookie")))
 }
 
 #[post("/build")]
-async fn build(server_state: &State<Arc<RwLock<ServerState>>>) -> Result<(), String>{
-    let all_zips_data = find_zip_data_in_folder(String::from("static/zips/")).map_err(|err| format!("Error: {err:#}"))?;
-    dump_and_save_zip_data(all_zips_data, String::from("static/index/data.json")).map_err(|err| format!("Error: {err:#}"))?;
-    let (doc_map, docid_to_int, document_size) = read_zips_data_from_json(String::from("static/index/data.json")).map_err(|err| format!("Error: {err:#}"))?;
+async fn build(server_state: &State<Arc<RwLock<ServerState>>>) -> Result<(), String> {
+    let all_zips_data = find_zip_data_in_folder(String::from("static/zips/")).map_err(|err|
+        format!("Error: {err:#}")
+    )?;
+    dump_and_save_zip_data(all_zips_data, String::from("static/index/data.json")).map_err(|err|
+        format!("Error: {err:#}")
+    )?;
+    let (doc_map, docid_to_int, document_size) = read_zips_data_from_json(
+        String::from("static/index/data.json")
+    ).map_err(|err| format!("Error: {err:#}"))?;
     let mut server_state = server_state.write().map_err(|err| format!("Error: {err:#}"))?;
     server_state.doc_map = doc_map;
     server_state.docid_to_int = docid_to_int;
@@ -284,86 +301,94 @@ async fn build(server_state: &State<Arc<RwLock<ServerState>>>) -> Result<(), Str
 }
 
 #[post("/clear")]
-async fn clear() -> Result<(), String>{
+async fn clear() -> Result<(), String> {
     let path = "static/zips";
     fs::remove_dir_all(path).map_err(|err| format!("Erorr: {err:#}"))?;
     fs::create_dir(path).map_err(|err| format!("Error: {err:#}"))?;
     Ok(())
 }
 
-#[derive(Default)]
-struct ServerState{
-    doc_map: DocumentMap, 
-    docid_to_int: BiMap<String, u64>,
-    document_size: FxHashMap<DocumentId, u64>
-}
-
 #[derive(Deserialize)]
-struct SearchData{
+struct SearchData {
     terms: Vec<String>,
     max_length: Option<i32>,
     min_score: Option<f64>,
 }
 
 #[derive(Serialize)]
-struct SearchResult{
+struct SearchResult {
     matches: Vec<SearchMatch>,
     total: usize,
 }
 
 #[derive(Serialize)]
-struct SearchMatch{
+struct SearchMatch {
     file_name: String,
     score: f64,
 }
 
 #[post("/search", data = "<req>")]
-fn search(req: Json<SearchData>, server_state: &State<Arc<RwLock<ServerState>>>) -> Result<Json<SearchResult>, String>{
+fn search(
+    req: Json<SearchData>,
+    server_state: &State<Arc<RwLock<ServerState>>>
+) -> Result<Json<SearchResult>, String> {
     let terms = req.terms.clone();
     let server_state = server_state.read().map_err(|err| format!("Error: {err:#}"))?;
-    
+
     let doc_map = &server_state.doc_map;
     let docid_to_int = &server_state.docid_to_int;
     let document_size = &server_state.document_size;
 
-    let results_map = run_search(&terms, &doc_map, &document_size, &bm25_score_function).map_err(|err| format!("Error: {err:#}"))?;
-    let ordered_results_map = order_results_map(&results_map).map_err(|err| format!("Error: {err:#}"))?;
-    let matches: Vec<SearchMatch> = ordered_results_map.iter().map(|(doc_id, score)| {
-        SearchMatch{
-            file_name: docid_to_int.get_by_right(doc_id).unwrap().to_string(),
-            score: *score,
-        }
-    }).collect();
+    let results_map = run_search(&terms, &doc_map, &document_size, &bm25_score_function).map_err(
+        |err| format!("Error: {err:#}")
+    )?;
+    let ordered_results_map = order_results_map(&results_map).map_err(|err|
+        format!("Error: {err:#}")
+    )?;
+    let matches: Vec<SearchMatch> = ordered_results_map
+        .iter()
+        .map(|(doc_id, score)| {
+            SearchMatch {
+                file_name: docid_to_int.get_by_right(doc_id).unwrap().to_string(),
+                score: *score,
+            }
+        })
+        .collect();
 
     let total = matches.len();
 
     let max_length = req.max_length.unwrap_or(total as i32);
     let min_score = req.min_score.unwrap_or(0.0);
 
-    let filtered_matches: Vec<SearchMatch> = matches.into_iter().filter(|search_match| search_match.score > min_score).take(max_length as usize).collect();
+    let filtered_matches: Vec<SearchMatch> = matches
+        .into_iter()
+        .filter(|search_match| search_match.score > min_score)
+        .take(max_length as usize)
+        .collect();
     let total = filtered_matches.len();
 
-    Ok(Json(SearchResult{
-        matches: filtered_matches,
-        total: total,
-    }))
-
+    Ok(
+        Json(SearchResult {
+            matches: filtered_matches,
+            total: total,
+        })
+    )
 }
 
 #[rocket::main]
 async fn main() -> eyre::Result<()> {
-    let server_state = Arc::new(RwLock::new(
-        ServerState{
-            doc_map: DocumentMap::default(), 
+    let server_state = Arc::new(
+        RwLock::new(ServerState {
+            doc_map: DocumentMap::default(),
             docid_to_int: BiMap::new(),
-            document_size: FxHashMap::default()    
-        }
-    ));
+            document_size: FxHashMap::default(),
+        })
+    );
 
     rocket
         ::build()
         .manage(server_state)
-        .mount("/", routes![index, upload, build, clear, search])   
+        .mount("/", routes![index, upload, build, clear, search])
         .mount("/dashboard", FileServer::from("static"))
         .ignite().await?
         .launch().await?;
