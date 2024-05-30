@@ -1,13 +1,14 @@
 #![allow(clippy::blocks_in_conditions)]
 
-use std::{ 
-    fs::{ File, DirEntry }, 
-    io::{ prelude::*, BufReader },
+use std::{
+    fs::{ File, DirEntry },
+    io::{ prelude::*, BufReader},
     sync::{ Arc, RwLock },
     fs,
-    collections::HashSet
+    collections::HashSet,
 };
 
+use rmp_serde::{ Deserializer, Serializer };
 use serde::{ Serialize, Deserialize };
 
 use tqdm::tqdm;
@@ -18,11 +19,12 @@ use fxhash::FxHashMap;
 
 #[macro_use]
 extern crate rocket;
-use rocket::{ fs::{FileServer, TempFile}, form::Form, serde::json::Json, State };
+use rocket::{ fs::{ FileServer, TempFile }, form::Form, serde::json::Json, State };
 
 type Term = String;
 type DocumentId = u64;
 
+#[derive(Deserialize, Serialize)]
 struct TermData {
     docset: FxHashMap<DocumentId, u64>,
     idf: f64,
@@ -33,7 +35,12 @@ type ResultsMap = FxHashMap<DocumentId, f64>;
 type GenericResultError<T> = Result<T, Box<dyn std::error::Error>>;
 
 // all the data we generate after parsing a folder of zip files
-type ZipData = (DocumentMap, BiMap<String, u64>, FxHashMap<DocumentId, u64>);
+#[derive(Deserialize, Serialize)]
+struct ZipsData {
+    doc_map: DocumentMap,
+    docid_to_int: BiMap<String, u64>,
+    doc_size: FxHashMap<DocumentId, u64>,
+}
 
 type ScoreFunction = dyn Fn(
     &Vec<String>,
@@ -97,9 +104,13 @@ fn dump_and_save_zip_data(
     Ok(())
 }
 
-fn read_zips_data_from_json(
-    file_path: String
-) -> GenericResultError<ZipData> {
+fn read_and_dump_zips(folder_path: String, json_file_path: String) -> GenericResultError<()> {
+    let all_zips_data = find_zip_data_in_folder(folder_path)?;
+    dump_and_save_zip_data(all_zips_data, json_file_path)?;
+    Ok(())
+}
+
+fn read_zips_data_from_json(file_path: String) -> GenericResultError<ZipsData> {
     let mut doc_map: DocumentMap = DocumentMap::default();
     let mut docid_to_int: BiMap<String, DocumentId> = BiMap::new();
 
@@ -138,7 +149,11 @@ fn read_zips_data_from_json(
         termdata.idf = ((doc_count - count + 0.5) / (count + 0.5) + 1.0).ln();
     }
 
-    Ok((doc_map, docid_to_int, document_size))
+    Ok(ZipsData {
+        doc_map,
+        docid_to_int,
+        doc_size: document_size,
+    })
 }
 
 #[allow(dead_code)]
@@ -166,7 +181,7 @@ fn run_search(
     search_terms: &Vec<String>,
     doc_map: &DocumentMap,
     doc_size: &FxHashMap<DocumentId, u64>,
-    score_function: &ScoreFunction,
+    score_function: &ScoreFunction
 ) -> GenericResultError<ResultsMap> {
     let mut search_results: ResultsMap = FxHashMap::default();
 
@@ -255,11 +270,8 @@ fn print_document_size(document_size: &FxHashMap<DocumentId, u64>) {
     }
 }
 
-#[derive(Default)]
 struct ServerState {
-    doc_map: DocumentMap,
-    docid_to_int: BiMap<String, u64>,
-    document_size: FxHashMap<DocumentId, u64>,
+    index: ZipsData,
 }
 
 #[get("/")]
@@ -273,36 +285,25 @@ struct Upload<'r> {
 }
 
 #[post("/upload", data = "<upload>")]
-async fn upload(mut upload: Form<Upload<'_>>) -> Result<Json<String>, String> {
+async fn upload(mut upload: Form<Upload<'_>>) -> Result<(), String> {
     let id = Uuid::new_v4();
     let mut path = "static/zips/".to_owned();
     let name = format!("{}.zip", id.simple());
     path.push_str(&name);
     upload.file.persist_to(path).await.map_err(|err| format!("Error: {err:#}"))?;
-    let all_zips_data = find_zip_data_in_folder(String::from("static/zips/")).map_err(|err|
-        format!("Error: {err:#}")
+    read_and_dump_zips(String::from("static/zips"), String::from("static/index/data.json")).map_err(
+        |err| format!("Error: {err:#}")
     )?;
-    dump_and_save_zip_data(all_zips_data, String::from("static/index/data.json")).map_err(|err|
-        format!("Error: {err:#}")
-    )?;
-    Ok(Json(String::from("ookie dookie")))
+    Ok(())
 }
 
 #[post("/build")]
 async fn build(server_state: &State<Arc<RwLock<ServerState>>>) -> Result<(), String> {
-    let all_zips_data = find_zip_data_in_folder(String::from("static/zips/")).map_err(|err|
+    let index = read_zips_data_from_json(String::from("static/index/data.json")).map_err(|err|
         format!("Error: {err:#}")
     )?;
-    dump_and_save_zip_data(all_zips_data, String::from("static/index/data.json")).map_err(|err|
-        format!("Error: {err:#}")
-    )?;
-    let (doc_map, docid_to_int, document_size) = read_zips_data_from_json(
-        String::from("static/index/data.json")
-    ).map_err(|err| format!("Error: {err:#}"))?;
     let mut server_state = server_state.write().map_err(|err| format!("Error: {err:#}"))?;
-    server_state.doc_map = doc_map;
-    server_state.docid_to_int = docid_to_int;
-    server_state.document_size = document_size;
+    server_state.index = index;
     Ok(())
 }
 
@@ -333,6 +334,36 @@ struct SearchMatch {
     score: f64,
 }
 
+#[post("/dump")]
+fn dump(
+    server_state: &State<Arc<RwLock<ServerState>>>
+) -> Result<(), String> {
+    let server_state = server_state.read().map_err(|err| format!("Error :{err:#}"))?;
+    let index = &server_state.index;
+
+    let mut buf = Vec::new();
+    index.serialize(&mut Serializer::new(&mut buf)).map_err(|err| format!("Error :{err:#}"))?;
+
+    let msgpack_index_path = String::from("static/index/index.mpk");
+    fs::write(msgpack_index_path, buf);
+
+    Ok(())
+
+}
+
+#[post("/load")]
+fn load(
+    server_state: &State<Arc<RwLock<ServerState>>>
+) -> Result<(), String> {
+    let msgpack_index_path = String::from("static/index/index.mpk");
+    let buf = fs::read(msgpack_index_path).map_err(|err| format!("Error :{err:#}"))?;
+    let index = rmp_serde::from_slice(&buf).map_err(|err| format!("Error :{err:#}"))?;
+
+    let mut server_state = server_state.write().map_err(|err| format!("Error: {err:#}"))?;
+    server_state.index = index;
+    Ok(())
+}
+
 #[post("/search", data = "<req>")]
 fn search(
     req: Json<SearchData>,
@@ -341,12 +372,12 @@ fn search(
     let terms = req.terms.clone();
     let server_state = server_state.read().map_err(|err| format!("Error: {err:#}"))?;
 
-    let doc_map = &server_state.doc_map;
-    let docid_to_int = &server_state.docid_to_int;
-    let document_size = &server_state.document_size;
+    let doc_map = &server_state.index.doc_map;
+    let docid_to_int = &server_state.index.docid_to_int;
+    let document_size = &server_state.index.doc_size;
 
-    let results_map = run_search(&terms, doc_map, document_size, &bm25_score_function).map_err(
-        |err| format!("Error: {err:#}")
+    let results_map = run_search(&terms, doc_map, document_size, &bm25_score_function).map_err(|err|
+        format!("Error: {err:#}")
     )?;
     let ordered_results_map = order_results_map(&results_map).map_err(|err|
         format!("Error: {err:#}")
@@ -383,18 +414,23 @@ fn search(
 
 #[rocket::main]
 async fn main() -> eyre::Result<()> {
+
+    let empty_index = ZipsData{
+        doc_map: DocumentMap::default(),
+        docid_to_int: BiMap::new(),
+        doc_size: FxHashMap::default(),
+    };
+
     let server_state = Arc::new(
         RwLock::new(ServerState {
-            doc_map: DocumentMap::default(),
-            docid_to_int: BiMap::new(),
-            document_size: FxHashMap::default(),
+            index: empty_index
         })
     );
 
     rocket
         ::build()
         .manage(server_state)
-        .mount("/", routes![index, upload, build, clear, search])
+        .mount("/", routes![index, upload, build, clear, search, dump, load])
         .mount("/dashboard", FileServer::from("static"))
         .ignite().await?
         .launch().await?;

@@ -96,7 +96,7 @@
         <div class="upload-area" id="upload-area">Drag & Drop or Click to Upload ZIP/APK File</div>
         <button id="upload-btn" disabled>Upload zip files</button>
         <hr>
-        <button id="build-btn">Build index</button>
+        <button id="build-btn">Build index</button> <button id="dump-btn">Dump index to disk</button> <button id="load-btn">Load index from disk</button>
         <hr>
         <button id="clear-btn">Clear zip files</button>
         <hr>
@@ -116,6 +116,8 @@
         const uploadBtn = document.querySelector("#upload-btn");
         const buildBtn = document.querySelector("#build-btn");
         const clearBtn = document.querySelector("#clear-btn");
+        const dumpBtn = document.querySelector("#dump-btn");
+        const loadBtn = document.querySelector("#load-btn");
         let file;
 
         uploadArea.addEventListener('dragover', (e) => {
@@ -177,6 +179,30 @@
                 alert("Index build successfully");
             }).catch(error =>{
                 alert("Error building index");
+            })
+        });
+
+        dumpBtn.addEventListener("click", ()=>{
+            fetch('/dump', {
+                method: 'POST',
+            }).then(response =>{
+                alert("Index successfully dumped to disk");
+            }).catch(error =>{
+                alert("Error dumping index to disk");
+            })
+        });
+
+        loadBtn.addEventListener("click", ()=>{
+            fetch('/load', {
+                method: 'POST',
+            }).then(response =>{
+                if (response.status == 200){
+                    alert("Index successfully loaded from disk");
+                } else {
+                    alert("Error loading index from disk");
+                }
+            }).catch(error =>{
+                alert("Error loading index from disk");
             })
         });
 
