@@ -8,7 +8,7 @@ use std::{
     collections::HashSet,
 };
 
-use rmp_serde::{ Deserializer, Serializer };
+use rmp_serde:: Serializer;
 use serde::{ Serialize, Deserialize };
 
 use tqdm::tqdm;
@@ -20,6 +20,7 @@ use fxhash::FxHashMap;
 #[macro_use]
 extern crate rocket;
 use rocket::{ fs::{ FileServer, TempFile }, form::Form, serde::json::Json, State };
+use zip_indexer::{GenericResultError, SearchData, SearchMatch, SearchResult};
 
 type Term = String;
 type DocumentId = u64;
@@ -32,7 +33,6 @@ struct TermData {
 
 type DocumentMap = FxHashMap<Term, TermData>;
 type ResultsMap = FxHashMap<DocumentId, f64>;
-type GenericResultError<T> = Result<T, Box<dyn std::error::Error>>;
 
 // all the data we generate after parsing a folder of zip files
 #[derive(Deserialize, Serialize)]
@@ -288,7 +288,7 @@ struct Upload<'r> {
 async fn upload(mut upload: Form<Upload<'_>>) -> Result<(), String> {
     let id = Uuid::new_v4();
     let mut path = "static/zips/".to_owned();
-    let name = format!("{}.zip", id.simple());
+    let name = format!("{}-{}.zip", upload.file.name().unwrap_or("_"), id.simple());
     path.push_str(&name);
     upload.file.persist_to(path).await.map_err(|err| format!("Error: {err:#}"))?;
     read_and_dump_zips(String::from("static/zips"), String::from("static/index/data.json")).map_err(
@@ -305,7 +305,7 @@ async fn build(server_state: &State<Arc<RwLock<ServerState>>>) -> Result<(), Str
     let mut server_state = server_state.write().map_err(|err| format!("Error: {err:#}"))?;
     server_state.index = index;
     Ok(())
-}
+} 
 
 #[post("/clear")]
 async fn clear() -> Result<(), String> {
@@ -315,24 +315,7 @@ async fn clear() -> Result<(), String> {
     Ok(())
 }
 
-#[derive(Deserialize)]
-struct SearchData {
-    terms: Vec<String>,
-    max_length: Option<i32>,
-    min_score: Option<f64>,
-}
 
-#[derive(Serialize)]
-struct SearchResult {
-    matches: Vec<SearchMatch>,
-    total: usize,
-}
-
-#[derive(Serialize)]
-struct SearchMatch {
-    file_name: String,
-    score: f64,
-}
 
 #[post("/dump")]
 fn dump(
@@ -345,10 +328,48 @@ fn dump(
     index.serialize(&mut Serializer::new(&mut buf)).map_err(|err| format!("Error :{err:#}"))?;
 
     let msgpack_index_path = String::from("static/index/index.mpk");
-    fs::write(msgpack_index_path, buf);
+    fs::write(msgpack_index_path, buf).map_err(|err| format!("Error :{err:#}"))?;
 
     Ok(())
 
+}
+
+#[derive(Serialize)]
+struct Zips {
+    zip_names: Vec<String>
+}
+#[get("/get_zips")]
+fn get_zips() -> Result<Json<Zips>, String> {
+    let folder_path = "static/zips";
+    let paths: Vec<String> = fs::read_dir(folder_path).unwrap().map(|entry| entry.unwrap().file_name().into_string().unwrap()).collect();
+    Ok(Json(Zips {
+        zip_names: paths
+    }))
+}
+
+
+#[derive(Deserialize)]
+struct DeleteRequest{
+    zip_id: u32,
+    zip_name: String,
+}
+
+#[post("/delete_zip", data = "<req>")]
+fn delete_zip(
+    req: Json<DeleteRequest>,
+) -> Result<(), String> {
+    let folder_path = "static/zips";
+    let zip_name = req.zip_name.clone();
+    let zip_id = req.zip_id;
+
+    let nth_in_folder = fs::read_dir(folder_path).unwrap().nth(zip_id as usize).unwrap().unwrap().file_name().into_string().unwrap();
+
+    if nth_in_folder == zip_name {
+        fs::remove_file(format!("{}/{}", folder_path, nth_in_folder)).map_err(|err| format!("Error: {err:#}"))?;
+        return Ok(());
+    } else {
+        return Err(String::from("Error deleting file"));
+    }
 }
 
 #[post("/load")]
@@ -430,7 +451,7 @@ async fn main() -> eyre::Result<()> {
     rocket
         ::build()
         .manage(server_state)
-        .mount("/", routes![index, upload, build, clear, search, dump, load])
+        .mount("/", routes![index, upload, build, clear, search, dump, load, get_zips, delete_zip])
         .mount("/dashboard", FileServer::from("static"))
         .ignite().await?
         .launch().await?;

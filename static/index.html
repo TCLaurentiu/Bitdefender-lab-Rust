@@ -1,9 +1,12 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>File Search Engine</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css"
+        type="text/css" />
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -15,15 +18,18 @@
             margin: 0;
             background-color: #f0f0f0;
         }
+
         .container {
             background-color: white;
             padding: 20px;
             border-radius: 8px;
             box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
-            width: 400px;
+            width: 33%;
             text-align: center;
-            display: block;
+            display: inline-table;
+            margin: 10px;
         }
+
         .header {
             background-color: #007bff;
             color: white;
@@ -36,6 +42,7 @@
             width: 100%;
             top: 0;
         }
+
         .upload-area {
             border: 2px dashed #007bff;
             padding: 20px;
@@ -44,16 +51,20 @@
             cursor: pointer;
             color: #007bff;
         }
+
         .upload-area.dragover {
             background-color: #e0e0e0;
         }
-        input[type="number"], textarea {
+
+        input[type="number"],
+        textarea {
             width: calc(50% - 10px);
             padding: 10px;
             margin: 5px;
             border: 1px solid #ccc;
             border-radius: 4px;
         }
+
         button {
             padding: 10px 20px;
             margin-top: 10px;
@@ -63,49 +74,115 @@
             border-radius: 4px;
             cursor: pointer;
         }
+
         button:disabled {
             background-color: #ccc;
         }
+
         .results-container {
             margin-top: 20px;
             text-align: left;
             display: block;
             width: 80%;
         }
+
         .results-header {
             font-weight: bold;
             margin-bottom: 10px;
         }
+
         .result-item {
             display: flex;
             justify-content: space-between;
             padding: 10px;
             border-bottom: 1px solid #ddd;
         }
+
         .result-md5 {
             font-weight: bold;
         }
+
         .result-score {
             color: #007bff;
         }
+
+        .zip-files span {
+            display: block;
+            margin-top: 10px;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        app {
+            display: flex;
+            width: 100%;
+        }
+
+        .zip-file-data span {
+            display: inline-table;
+            word-break: break-all;
+        }
+
+        .zip-file-data>.file-name {
+            width: 90%;
+        }
+
+        .zip-file-data>.delete-btn {
+            width: auto;
+            margin: 5px;
+        }
+
+        .delete-btn i{
+            pointer-events: none;
+        }
+
+        .delete-btn:hover {
+            transform: scale(1.1);
+        }
+
+        .delete-btn {
+            transition-timing-function: linear;
+            transition-duration: 0.4s;
+            cursor: pointer;
+        }
+        .zip-files{
+            overflow: auto;
+            height: 500px;
+        }
     </style>
 </head>
+
 <body>
     <div class="header">Bitdefender Cool Zip Search</div>
-    <div class="container">
-        <div class="upload-area" id="upload-area">Drag & Drop or Click to Upload ZIP/APK File</div>
-        <button id="upload-btn" disabled>Upload zip files</button>
-        <hr>
-        <button id="build-btn">Build index</button> <button id="dump-btn">Dump index to disk</button> <button id="load-btn">Load index from disk</button>
-        <hr>
-        <button id="clear-btn">Clear zip files</button>
-        <hr>
-        <textarea id="search-terms" placeholder="File names separated by commas" oninput="searchBtn.disabled = this.value.trim() === ''"></textarea><br>
-        <input type="number" id="min-score" placeholder="Min Similarity Score" min="0" max="100">
-        <input type="number" id="max-length" placeholder="Max Return Length" min="1"><br>
-        <button id="search-btn" disabled>Search</button>
-    </div>
-    
+    <app>
+        <div class="container">
+            <span style="font-size:20px">Uploaded zip files</span>
+            <div class="zip-files">
+
+            </div>
+        </div>
+        <div class="container">
+            <div class="upload-area" id="upload-area">Drag & Drop or Click to Upload ZIP/APK File</div>
+            <button id="upload-btn" disabled>Upload zip files</button>
+            <hr>
+            <button id="build-btn">Build index</button> <button id="dump-btn">Dump index to disk</button> <button
+                id="load-btn">Load index from disk</button>
+            <hr>
+            <button id="clear-btn">Clear zip files</button>
+            <hr>
+            <textarea id="search-terms" placeholder="File names separated by commas"
+                oninput="searchBtn.disabled = this.value.trim() === ''"></textarea><br>
+            <input type="number" id="min-score" placeholder="Min Similarity Score" min="0" max="100">
+            <input type="number" id="max-length" placeholder="Max Return Length" min="1"><br>
+            <button id="search-btn" disabled>Search</button>
+        </div>
+        <div class="container">
+            bla
+        </div>
+    </app>
+
     <div class="results-container" id="results-container">
         <div id="results"></div>
     </div>
@@ -118,7 +195,60 @@
         const clearBtn = document.querySelector("#clear-btn");
         const dumpBtn = document.querySelector("#dump-btn");
         const loadBtn = document.querySelector("#load-btn");
+        const zipFileContainer = document.querySelector(".zip-files")
         let file;
+
+        let add_delete_handlers = () => {
+            let delete_btns = document.querySelectorAll(".delete-btn");
+            delete_btns.forEach(btn => {
+                btn.addEventListener("click", (ev) =>{
+                    let file_name = ev.target.getAttribute("data-name");
+                    let file_id = parseInt(ev.target.getAttribute("data-index"));
+                    fetch("/delete_zip", {
+                        method: "POST",          
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            "zip_name": file_name,
+                            "zip_id": file_id
+                        })
+                    }).then(resp => {
+                        if (resp.status == 200){
+                            display_uploaded_zips();
+                        } else {
+                            alert("Failed to delete zip");
+                        }
+                    })
+                })
+            })
+        }
+
+        let display_uploaded_zips = () => {
+            fetch('/get_zips', {
+                method: 'GET',
+            }).then(response => {
+                if (response.status != 200) {
+                    alert("Error loading zip files");
+                } else {
+                    return response.json()
+                }
+            })
+                .then(response => {
+                    console.log(response);
+                    zipFileContainer.innerHTML = "";
+                    response.zip_names.forEach((file_name, index) => {
+                        let span = document.createElement("span");
+                        span.classList.add("zip-file-data");
+                        span.innerHTML = `<span class="file-name">${file_name}</span><span class="delete-btn" data-name="${file_name}" data-index="${index}"><i class="fa-solid fa-trash"></i></span>`;
+                        zipFileContainer.appendChild(span);
+                    })
+                    add_delete_handlers();
+                }).catch(error => {
+                    console.log(error);
+                    alert("Error loading zip files");
+                })
+        }
 
         uploadArea.addEventListener('dragover', (e) => {
             e.preventDefault();
@@ -164,54 +294,54 @@
                 method: 'POST',
                 body: formData
             })
-            .then(response => {
-                alert("Zip file succesfully uplaoded");
-            })
-            .catch(error => {
-                alert("Error uploading zip file");
-            });
+                .then(response => {
+                    display_uploaded_zips();
+                })
+                .catch(error => {
+                    alert("Error uploading zip file");
+                });
         });
 
-        buildBtn.addEventListener("click", ()=>{
+        buildBtn.addEventListener("click", () => {
             fetch('/build', {
                 method: 'POST',
-            }).then(response =>{
+            }).then(response => {
                 alert("Index build successfully");
-            }).catch(error =>{
+            }).catch(error => {
                 alert("Error building index");
             })
         });
 
-        dumpBtn.addEventListener("click", ()=>{
+        dumpBtn.addEventListener("click", () => {
             fetch('/dump', {
                 method: 'POST',
-            }).then(response =>{
+            }).then(response => {
                 alert("Index successfully dumped to disk");
-            }).catch(error =>{
+            }).catch(error => {
                 alert("Error dumping index to disk");
             })
         });
 
-        loadBtn.addEventListener("click", ()=>{
+        loadBtn.addEventListener("click", () => {
             fetch('/load', {
                 method: 'POST',
-            }).then(response =>{
-                if (response.status == 200){
+            }).then(response => {
+                if (response.status == 200) {
                     alert("Index successfully loaded from disk");
                 } else {
                     alert("Error loading index from disk");
                 }
-            }).catch(error =>{
+            }).catch(error => {
                 alert("Error loading index from disk");
             })
         });
 
-        clearBtn.addEventListener("click", ()=>{
+        clearBtn.addEventListener("click", () => {
             fetch('/clear', {
                 method: 'POST',
-            }).then(response=>{
-                alert("Zip files cleared. You may wish to rebuild the index");
-            }).catch(error =>{
+            }).then(response => {
+                display_uploaded_zips();    
+            }).catch(error => {
                 alert("Error clearing zip files");
             })
         })
@@ -235,16 +365,18 @@
                 },
                 body: JSON.stringify(postData)
             })
-            .then(response => response.json())
-            .then(data => {
-                load_data(data);
-            })
-            .catch(error => {
-                console.error('Error:', error);
-            });
+                .then(response => response.json())
+                .then(data => {
+                    load_data(data);
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                });
         });
 
-        function load_data(data){
+        display_uploaded_zips();
+
+        function load_data(data) {
             const resultsDiv = document.getElementById('results');
             resultsDiv.innerHTML = `<div>Total Matches: ${data.total}</div>`;
             data.matches.forEach(match => {
@@ -256,4 +388,5 @@
         }
     </script>
 </body>
+
 </html>
