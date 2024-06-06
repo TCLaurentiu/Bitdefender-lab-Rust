@@ -80,14 +80,22 @@ fn main() -> GenericResultError<()>{
       min_score: Some(min_score),
     };
 
-    let res: SearchResult = client.post(SEARCH_API).json(&search_data).send()?.json()?;
-    if res.total == 0{
-      println!("No results found");
+    let res = client.post(SEARCH_API).json(&search_data).send();
+    
+    if let Err(err) = res {
+      println!("Error running search: {:?}", err);
+      continue;
     } else {
-      for result in res.matches{
-        println!("Found {}, with score {}", result.file_name, result.score);
+      let res: SearchResult = res?.json()?;
+
+      if res.total == 0{
+        println!("No results found");
+      } else {
+        for result in res.matches{
+          println!("Found {}, with score {}", result.file_name, result.score);
+        }
       }
-    }
+  }
 
   }
   Ok(())
